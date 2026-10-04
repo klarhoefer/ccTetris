@@ -29,8 +29,8 @@
     <div class="box"><h3>Linien</h3><div class="val" id="lines">0</div></div>
     <div class="box"><h3>Level</h3><div class="val" id="level">1</div></div>
     <div class="box" id="help">
-      <kbd>←</kbd> drehen links<br>
-      <kbd>→</kbd> drehen rechts<br>
+      <kbd>←</kbd> <kbd>→</kbd> verschieben<br>
+      <kbd>↑</kbd> <kbd>↓</kbd> drehen<br>
       <kbd>Space</kbd> fallen lassen<br>
       <kbd>P</kbd> Pause
     </div>
@@ -54,7 +54,7 @@
   const KEYS = Object.keys(SHAPES);
 
   let grid, cur, next, bag, score, lines, level, state, over;
-  let sweepT, gravT, dir, flash, flashT, drawX;
+  let gravT, flash, flashT, drawX;
 
   const rotCW  = m => m[0].map((_, i) => m.map(r => r[i]).reverse());
   const rotCCW = m => m[0].map((_, i) => m.map(r => r[r.length - 1 - i]));
@@ -99,12 +99,10 @@
   function spawn() {
     cur = next;
     next = makePiece(draw7());
-    dir = Math.random() < 0.5 ? 1 : -1;
-    sweepT = 0; gravT = 0; drawX = cur.x;
+    gravT = 0; drawX = cur.x;
     if (hits(cur.m, cur.x, cur.y)) { state = 'over'; }
   }
 
-  const sweepInterval = () => Math.max(110, 190 - level * 8);
   const gravInterval  = () => Math.max(300, 1000 - level * 70);
 
   function rotate(cw) {
@@ -157,15 +155,6 @@
       flashT -= dt;
       if (flashT <= 0) finishFlash();
       return;
-    }
-    sweepT += dt * 1000;
-    while (sweepT >= sweepInterval()) {
-      sweepT -= sweepInterval();
-      if (!hits(cur.m, cur.x + dir, cur.y)) cur.x += dir;
-      else {
-        dir = -dir;
-        if (!hits(cur.m, cur.x + dir, cur.y)) cur.x += dir;
-      }
     }
     gravT += dt * 1000;
     while (gravT >= gravInterval()) {
@@ -246,8 +235,10 @@
     }
     if (e.code === 'KeyP') { state = state === 'pause' ? 'play' : 'pause'; return; }
     if (state !== 'play' || flash) return;
-    if (e.code === 'ArrowLeft') rotate(false);
-    else if (e.code === 'ArrowRight') rotate(true);
+    if (e.code === 'ArrowLeft') { if (!hits(cur.m, cur.x - 1, cur.y)) cur.x--; }
+    else if (e.code === 'ArrowRight') { if (!hits(cur.m, cur.x + 1, cur.y)) cur.x++; }
+    else if (e.code === 'ArrowUp') rotate(true);
+    else if (e.code === 'ArrowDown') rotate(false);
     else if (e.code === 'Space') hardDrop();
   });
 

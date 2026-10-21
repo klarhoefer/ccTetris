@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAW Viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; min-height: 100%; background: #0f1220; color: #e8eaf6;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #wrap { max-width: 1200px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  .box { background: #171b2e; border: 2px solid #2b3154; border-radius: 6px; padding: 10px 12px; }
+  .box h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #8b93c4; font-weight: 600; }
+  #controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  label { font-size: 13px; color: #b4b9dc; display: flex; gap: 6px; align-items: center; }
+  select, input[type=number], button { background: #2b3154; color: #fff; border: 1px solid #3a4170; border-radius: 4px;
+    padding: 5px 8px; font: inherit; font-size: 13px; }
+  input[type=number] { width: 90px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #drop { border: 2px dashed #3a4170; border-radius: 6px; padding: 18px; text-align: center; color: #8b93c4; cursor: pointer; }
+  #drop.over { border-color: #8b93c4; color: #e8eaf6; }
+  #info { font-size: 13px; color: #b4b9dc; font-variant-numeric: tabular-nums; min-height: 1.2em; }
+  #plot { width: 100%; height: 420px; display: block; background: #171b2e; border: 2px solid #2b3154; border-radius: 6px;
+    cursor: grab; touch-action: none; }
+  #plot.drag { cursor: grabbing; }
+  #help { font-size: 13px; line-height: 1.7; color: #b4b9dc; }
+  kbd { background: #2b3154; border-radius: 4px; padding: 1px 6px; font-size: 12px; color: #fff; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>RAW-Viewer (s16le)</h1>
+
+  <div class="box">
+    <h3>Datei</h3>
+    <div id="drop">RAW-Datei hierher ziehen oder klicken zum Auswählen
+      <input type="file" id="file" accept=".raw,.pcm,.s16le,application/octet-stream" hidden>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3>Format</h3>
+    <div id="controls">
+      <label>Kanäle
+        <select id="channels"><option value="1">1 (Mono)</option><option value="2" selected>2 (Stereo)</option></select>
+      </label>
+      <label>Samplerate
+        <input type="number" id="rate" value="44100" min="1000" max="384000" step="1">
+      </label>
+      <label>Byte-Reihenfolge
+        <select id="endian"><option value="le" selected>Little Endian (s16le)</option><option value="be">Big Endian (s16be)</option></select>
+      </label>
+      <button id="play" disabled>▶ Abspielen</button>
+      <button id="reset" disabled>Ganz anzeigen</button>
+    </div>
+  </div>
+
+  <div id="info">Keine Datei geladen.</div>
+  <canvas id="plot"></canvas>
+
+  <div class="box" id="help">
+    <kbd>Mausrad</kbd> zoomen &nbsp; <kbd>Ziehen</kbd> verschieben &nbsp; <kbd>Doppelklick</kbd> Wiedergabe ab Position &nbsp; <kbd>Leertaste</kbd> Play/Pause<br>
+    Passend z.&nbsp;B. für: <code>ffmpeg -i song.mp3 -f s16le -acodec pcm_s16le -ar 44100 -ac 2 song.raw</code>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $('plot'), ctx = canvas.getContext('2d');
+const COLORS = ['#4fc3f7', '#ff8a65'];
+
+let bytes = null;      // raw file contents
+let data = [];         // Float32Array per channel, normalized to [-1, 1]
+let frames = 0;
+let fileName = '';
+let view = { start: 0, end: 1 };  // visible range in frames
+
+// playback state
+let audioCtx = null, source = null, playStartTime = 0, playOffset = 0, playing = false;
+
+function decode() {
+  if (!bytes) return;
+  const ch = +$('channels').value;
+  const little = $('endian').value === 'le';
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  frames = Math.floor(bytes.byteLength / (2 * ch));
+  data = [];
+  for (let c = 0; c < ch; c++) data.push(new Float32Array(frames));
+  for (let i = 0, off = 0; i < frames; i++) {
+    for (let c = 0; c < ch; c++, off += 2) data[c][i] = dv.getInt16(off, little) / 32768;
+  }
+  stop();
+  view = { start: 0, end: Math.max(frames, 1) };
+  updateInfo();
+  $('play').disabled = $('reset').disabled = frames === 0;
+  draw();
+}
+
+function rate() { return Math.max(1, +$('rate').value || 44100); }
+
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60), s = sec - m * 60;
+  return `${m}:${s.toFixed(sec < 10 && view.end - view.start < rate() * 2 ? 3 : 1).padStart(4, '0')}`;
+}
+
+function updateInfo() {
+  if (!bytes) return;
+  const ch = data.length;
+  let peak = 0, sumSq = 0;
+  for (const d of data) for (let i = 0; i < d.length; i++) { const v = d[i]; const a = v < 0 ? -v : v; if (a > peak) peak = a; sumSq += v * v; }
+  const rms = Math.sqrt(sumSq / Math.max(1, frames * ch));
+  const db = v => v > 0 ? (20 * Math.log10(v)).toFixed(1) + ' dBFS' : '−∞';
+  $('info').textContent = `${fileName} · ${(bytes.byteLength / 1048576).toFixed(2)} MB · ${frames.toLocaleString('de-DE')} Frames · ` +
+    `Dauer ${fmtTime(frames / rate())} · Peak ${db(peak)} · RMS ${db(rms)}`;
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.round(r.width * dpr);
+  canvas.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+const AXIS_H = 22;
+
+function draw() {
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+  if (!frames) {
+    ctx.fillStyle = '#8b93c4'; ctx.font = '14px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('Lade eine RAW-Datei, um die Wellenform zu sehen.', W / 2, H / 2);
+    return;
+  }
+  const ch = data.length, laneH = (H - AXIS_H) / ch;
+  const span = view.end - view.start, fpp = span / W;  // frames per pixel
+
+  for (let c = 0; c < ch; c++) {
+    const top = c * laneH, mid = top + laneH / 2, amp = laneH / 2 - 4, d = data[c];
+    // grid lines
+    ctx.strokeStyle = '#2b3154'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const g of [-1, -0.5, 0, 0.5, 1]) { const y = Math.round(mid - g * amp) + 0.5; ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+    if (c > 0) { ctx.strokeStyle = '#3a4170'; ctx.beginPath(); ctx.moveTo(0, top + .5); ctx.lineTo(W, top + .5); ctx.stroke(); }
+
+    ctx.fillStyle = ctx.strokeStyle = COLORS[c % COLORS.length];
+    if (fpp > 1) {
+      // min/max envelope per pixel column
+      ctx.beginPath();
+      for (let x = 0; x < W; x++) {
+        let i0 = Math.floor(view.start + x * fpp), i1 = Math.min(frames, Math.floor(view.start + (x + 1) * fpp));
+        if (i0 >= frames) break;
+        let mn = 1, mx = -1;
+        for (let i = i0; i < i1; i++) { const v = d[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+        if (mn > mx) continue;
+        ctx.rect(x, mid - mx * amp, 1, Math.max(1, (mx - mn) * amp));
+      }
+      ctx.fill();
+    } else {
+      // individual samples as a line (plus dots when very zoomed in)
+      const i0 = Math.max(0, Math.floor(view.start)), i1 = Math.min(frames - 1, Math.ceil(view.end));
+      ctx.lineWidth = 1.5; ctx.beginPath();
+      for (let i = i0; i <= i1; i++) {
+        const x = (i - view.start) / fpp, y = mid - d[i] * amp;
+        i === i0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      if (fpp < 0.125) for (let i = i0; i <= i1; i++) {
+        ctx.beginPath(); ctx.arc((i - view.start) / fpp, mid - d[i] * amp, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.fillStyle = '#8b93c4'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText(ch === 2 ? (c ? 'R' : 'L') : 'Mono', 6, top + 14);
+  }
+
+  // time axis
+  const axisY = H - AXIS_H, sr = rate(), secSpan = span / sr;
+  ctx.fillStyle = '#1d2238'; ctx.fillRect(0, axisY, W, AXIS_H);
+  const steps = [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+  const step = steps.find(s => secSpan / s <= W / 90) || 1200;
+  ctx.strokeStyle = '#3a4170'; ctx.fillStyle = '#b4b9dc'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+  const digits = Math.max(0, -Math.floor(Math.log10(step)));
+  for (let t = Math.ceil(view.start / sr / step) * step; t <= view.end / sr; t += step) {
+    const x = Math.round((t * sr - view.start) / fpp) + .5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, axisY + 4); ctx.stroke();
+    const m = Math.floor(t / 60 + 1e-9), s = t - m * 60;
+    ctx.fillText(`${m}:${Math.abs(s).toFixed(digits).padStart(digits ? 3 + digits : 2, '0')}`, x, axisY + 16);
+  }
+
+  // playback cursor
+  const pos = playPosition();
+  if (pos >= view.start && pos <= view.end) {
+    const x = Math.round((pos - view.start) / fpp) + .5;
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, axisY); ctx.stroke();
+  }
+}
+
+/* ---------- playback ---------- */
+function playPosition() {  // in frames
+  return playing ? playOffset + (audioCtx.currentTime - playStartTime) * rate() : playOffset;
+}
+
+function play(fromFrame) {
+  if (!frames) return;
+  stop();
+  audioCtx = audioCtx || new AudioContext();
+  const sr = rate(), buf = audioCtx.createBuffer(data.length, frames, sr);
+  data.forEach((d, c) => buf.copyToChannel(d, c));
+  playOffset = Math.max(0, Math.min(frames - 1, fromFrame ?? playOffset));
+  source = audioCtx.createBufferSource();
+  source.buffer = buf;
+  source.connect(audioCtx.destination);
+  source.onended = () => { if (source === src) { playing = false; playOffset = 0; $('play').textContent = '▶ Abspielen'; draw(); } };
+  const src = source;
+  source.start(0, playOffset / sr);
+  playStartTime = audioCtx.currentTime;
+  playing = true;
+  $('play').textContent = '⏸ Pause';
+  requestAnimationFrame(tick);
+}
+
+function stop() {
+  if (source) {
+    if (playing) playOffset = playPosition();
+    const s = source; source = null; s.onended = null;
+    try { s.stop(); } catch {}
+  }
+  playing = false;
+  $('play').textContent = '▶ Abspielen';
+}
+
+function tick() {
+  if (!playing) return;
+  draw();
+  requestAnimationFrame(tick);
+}
+
+/* ---------- file loading ---------- */
+async function load(file) {
+  fileName = file.name;
+  $('info').textContent = `Lade ${file.name} …`;
+  bytes = new Uint8Array(await file.arrayBuffer());
+  playOffset = 0;
+  decode();
+}
+
+const drop = $('drop');
+drop.onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); e.dataTransfer.files[0] && load(e.dataTransfer.files[0]); };
+document.body.ondragover = e => e.preventDefault();
+document.body.ondrop = e => { e.preventDefault(); e.dataTransfer.files[0] && load(e.dataTransfer.files[0]); };
+
+$('channels').onchange = $('endian').onchange = () => { playOffset = 0; decode(); };
+$('rate').onchange = () => { stop(); updateInfo(); draw(); };
+$('play').onclick = () => playing ? (stop(), draw()) : play();
+$('reset').onclick = () => { view = { start: 0, end: frames }; draw(); };
+
+/* ---------- zoom & pan ---------- */
+function clampView() {
+  const span = Math.min(frames, Math.max(10, view.end - view.start));
+  view.start = Math.max(0, Math.min(frames - span, view.start));
+  view.end = view.start + span;
+}
+
+canvas.addEventListener('wheel', e => {
+  if (!frames) return;
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect(), fx = (e.clientX - r.left) / r.width;
+  const span = view.end - view.start, anchor = view.start + fx * span;
+  const f = Math.exp(e.deltaY * 0.0015), ns = span * f;
+  view.start = anchor - fx * ns; view.end = view.start + ns;
+  clampView(); draw();
+}, { passive: false });
+
+let dragX = null, dragStart = 0;
+canvas.addEventListener('pointerdown', e => {
+  if (!frames) return;
+  dragX = e.clientX; dragStart = view.start;
+  canvas.setPointerCapture(e.pointerId); canvas.classList.add('drag');
+});
+canvas.addEventListener('pointermove', e => {
+  if (dragX === null) return;
+  const span = view.end - view.start;
+  view.start = dragStart - (e.clientX - dragX) / canvas.clientWidth * span;
+  view.end = view.start + span;
+  clampView(); draw();
+});
+canvas.addEventListener('pointerup', () => { dragX = null; canvas.classList.remove('drag'); });
+canvas.addEventListener('dblclick', e => {
+  if (!frames) return;
+  const r = canvas.getBoundingClientRect();
+  play(view.start + (e.clientX - r.left) / r.width * (view.end - view.start));
+});
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && frames && e.target.tagName !== 'INPUT') {
+    e.preventDefault(); playing ? (stop(), draw()) : play();
+  }
+});
+
+window.addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>

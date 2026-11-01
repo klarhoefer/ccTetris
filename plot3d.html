@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Surface Plot 3D</title>
+<style>
+  :root { --bg: #0f1218; --fg: #e6e9ef; --muted: #9aa3b2; --panel: rgba(20, 24, 32, 0.8); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #info { position: absolute; top: 16px; left: 16px; max-width: calc(100% - 32px); box-sizing: border-box;
+    padding: 12px 16px; background: var(--panel); border-radius: 8px; line-height: 1.4; }
+  #info h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+  #info p { margin: 0; font-size: 13px; color: var(--muted); }
+  #info label { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; margin-right: 12px; font-size: 13px; }
+  .axis-label { position: absolute; font-size: 14px; font-weight: 600; pointer-events: none; transform: translate(-50%, -50%); }
+</style>
+</head>
+<body>
+<div id="info">
+  <h1>z = 7xy / e<sup>(x² + y²)</sup></h1>
+  <p>Drag to rotate · scroll to zoom · right-drag to pan · x, y ∈ [−3, 3]</p>
+  <label><input type="checkbox" id="wire" checked> Wireframe</label>
+  <label><input type="checkbox" id="spin"> Auto-rotate</label>
+</div>
+<div class="axis-label" id="lx" style="color:#ff6b6b">x</div>
+<div class="axis-label" id="ly" style="color:#51cf66">y</div>
+<div class="axis-label" id="lz" style="color:#4dabf7">z</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const f = (x, y) => 7 * x * y * Math.exp(-(x * x + y * y));
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1218);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(6, 5, 6);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotateSpeed = 1.5;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(5, 10, 7);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+fill.position.set(-5, -6, -4);
+scene.add(fill);
+
+// Surface: math (x, y, z) mapped to three.js (x, z, -y) so z points up.
+const RANGE = 3, N = 160;
+const geo = new THREE.PlaneGeometry(2 * RANGE, 2 * RANGE, N, N);
+geo.rotateX(-Math.PI / 2); // plane now in XZ: (x, y, 0) -> (x, 0, -y)
+const pos = geo.attributes.position;
+const colors = new Float32Array(pos.count * 3);
+const zMax = 7 * 0.5 * Math.exp(-1); // extremum at |x| = |y| = 1/sqrt(2)
+const c = new THREE.Color();
+const cold = new THREE.Color(0x3b5bdb), mid = new THREE.Color(0xe9ecef), hot = new THREE.Color(0xe8590c);
+
+for (let i = 0; i < pos.count; i++) {
+  const x = pos.getX(i);
+  const y = -pos.getZ(i);
+  const z = f(x, y);
+  pos.setY(i, z);
+  const t = z / zMax; // in [-1, 1]
+  if (t < 0) c.copy(mid).lerp(cold, -t); else c.copy(mid).lerp(hot, t);
+  colors.set([c.r, c.g, c.b], i * 3);
+}
+geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geo.computeVertexNormals();
+
+const surface = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+  vertexColors: true, side: THREE.DoubleSide, shininess: 40,
+  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+}));
+scene.add(surface);
+
+const wireGeo = new THREE.WireframeGeometry(new THREE.PlaneGeometry(2 * RANGE, 2 * RANGE, 40, 40)
+  .rotateX(-Math.PI / 2));
+{
+  const p = wireGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setY(i, f(p.getX(i), -p.getZ(i)));
+}
+const wire = new THREE.LineSegments(wireGeo,
+  new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 }));
+scene.add(wire);
+
+// Floor grid and axes
+const grid = new THREE.GridHelper(2 * RANGE, 12, 0x3a4150, 0x262b36);
+grid.position.y = -2;
+scene.add(grid);
+
+function axis(dir, color) {
+  const L = RANGE + 0.8;
+  const arrow = new THREE.ArrowHelper(dir, new THREE.Vector3(0, 0, 0), L, color, 0.2, 0.1);
+  scene.add(arrow);
+  const neg = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), dir.clone().multiplyScalar(-L)]),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.4 }));
+  scene.add(neg);
+  return dir.clone().multiplyScalar(L + 0.3);
+}
+const tips = {
+  lx: axis(new THREE.Vector3(1, 0, 0), 0xff6b6b),
+  ly: axis(new THREE.Vector3(0, 0, -1), 0x51cf66),
+  lz: axis(new THREE.Vector3(0, 1, 0), 0x4dabf7),
+};
+tips.lz.multiplyScalar(0.6);
+const labels = Object.fromEntries(Object.keys(tips).map(k => [k, document.getElementById(k)]));
+
+document.getElementById('wire').addEventListener('change', e => wire.visible = e.target.checked);
+document.getElementById('spin').addEventListener('change', e => controls.autoRotate = e.target.checked);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const v = new THREE.Vector3();
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+  for (const k in tips) {
+    v.copy(tips[k]).project(camera);
+    const el = labels[k];
+    el.style.display = v.z < 1 ? 'block' : 'none';
+    el.style.left = ((v.x + 1) / 2 * innerWidth) + 'px';
+    el.style.top = ((1 - v.y) / 2 * innerHeight) + 'px';
+  }
+});
+</script>
+</body>
+</html>
